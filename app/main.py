@@ -102,8 +102,6 @@ def generate_pdf(account_id: int):
         y -= 20
 
     # Footer
-    c.setFont("Helvetica-Oblique", 9)
-    c.drawString(50, 50, "This is a system-generated statement.")
     c.save()
 
     return FileResponse(
