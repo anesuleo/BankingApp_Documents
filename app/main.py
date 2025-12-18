@@ -11,7 +11,7 @@ app = FastAPI(title="Document Service")
 
 ACCOUNT_SERVICE_BASE_URL = os.getenv(
     "ACCOUNT_SERVICE_BASE_URL",
-    "http://localhost:8002"
+    "http://localhost:8000"
 )
 
 
