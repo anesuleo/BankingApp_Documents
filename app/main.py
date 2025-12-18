@@ -1,17 +1,17 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from datetime import datetime
 import httpx
 import os
+from io import BytesIO
 
 app = FastAPI(title="Document Service")
 
-# Base URL for Account microservice
 ACCOUNT_SERVICE_BASE_URL = os.getenv(
     "ACCOUNT_SERVICE_BASE_URL",
-    "http://localhost:8000"
+    "http://localhost:8002"
 )
 
 
@@ -24,10 +24,10 @@ def health():
 def generate_account_statement(account_number: str):
     """
     Fetch transactions from Account microservice
-    and generate a PDF account statement.
+    and return a PDF statement without writing to disk.
     """
 
-    # -------- Call Account microservice --------
+    # ---- Call Account microservice ----
     url = f"{ACCOUNT_SERVICE_BASE_URL}/accounts/by-number/{account_number}/transactions"
 
     try:
@@ -44,13 +44,9 @@ def generate_account_statement(account_number: str):
 
     transactions = response.json()
 
-    # -------- Prepare PDF storage --------
-    os.makedirs("docs", exist_ok=True)
-    filename = f"statement_{account_number}.pdf"
-    filepath = os.path.join("docs", filename)
-
-    # -------- Generate PDF --------
-    c = canvas.Canvas(filepath, pagesize=letter)
+    # ---- Create PDF in memory ----
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
 
     # Header
@@ -76,46 +72,46 @@ def generate_account_statement(account_number: str):
     c.drawString(490, y, "Description")
     c.line(40, y - 5, 560, y - 5)
 
-    # Table rows
+    # Rows
     y -= 25
     c.setFont("Helvetica", 10)
 
     for tx in transactions:
-        # Handle ISO datetime with Z suffix
         created_at = datetime.fromisoformat(
             tx["created_at"].replace("Z", "+00:00")
         ).strftime("%Y-%m-%d %H:%M")
 
-        tx_type = tx["tx_type"]
-        amount = str(tx["amount"])
+        c.drawString(40, y, created_at)
+        c.drawString(130, y, tx["tx_type"])
+        c.drawString(220, y, str(tx["amount"]))
 
         from_acc = tx.get("sender_account_number") or "-"
         to_acc = tx.get("receiver_account_number") or "-"
-        description = tx.get("description") or "-"
+        desc = tx.get("description") or "-"
 
-        c.drawString(40, y, created_at)
-        c.drawString(130, y, tx_type)
-        c.drawString(220, y, amount)
         c.drawString(320, y, from_acc)
         c.drawString(410, y, to_acc)
-        c.drawString(490, y, description[:20])
+        c.drawString(490, y, desc[:20])
 
         y -= 20
-
-        # Page break
         if y < 80:
             c.showPage()
             c.setFont("Helvetica", 10)
             y = height - 80
 
-    # Footer
     c.setFont("Helvetica-Oblique", 9)
     c.drawString(50, 50, "This is a system-generated statement.")
     c.save()
 
-    # -------- Return PDF --------
-    return FileResponse(
-        path=filepath,
+    buffer.seek(0)
+
+    # ---- Stream PDF back ----
+    headers = {
+        "Content-Disposition": f'attachment; filename="statement_{account_number}.pdf"'
+    }
+
+    return StreamingResponse(
+        buffer,
         media_type="application/pdf",
-        filename=filename
+        headers=headers
     )
