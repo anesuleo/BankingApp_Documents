@@ -1,73 +1,69 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from datetime import datetime
+import httpx
 import os
 
 app = FastAPI(title="Document Service")
 
-# Dummy transactions that match TransactionRead schema
-DUMMY_TRANSACTIONS = [
-    {
-        "id": 1,
-        "account_id": 123,
-        "tx_type": "deposit",
-        "amount": "1000.00",
-        "description": "Initial deposit",
-        "sender_name": None,
-        "sender_account_number": None,
-        "receiver_name": "John Doe",
-        "receiver_account_number": "TA1234",
-        "created_at": "2025-10-01"
-    },
-    {
-        "id": 2,
-        "account_id": 123,
-        "tx_type": "withdrawal",
-        "amount": "-200.00",
-        "description": "ATM withdrawal",
-        "sender_name": "John Doe",
-        "sender_account_number": "TA1234",
-        "receiver_name": None,
-        "receiver_account_number": None,
-        "created_at": "2025-10-05"
-    },
-    {
-        "id": 3,
-        "account_id": 123,
-        "tx_type": "transfer_out",
-        "amount": "-150.00",
-        "description": "Sent to Mary",
-        "sender_name": "John Doe",
-        "sender_account_number": "TA1234",
-        "receiver_name": "Mary",
-        "receiver_account_number": "AB9876",
-        "created_at": "2025-10-12"
-    },
-]
+# Base URL for Account microservice
+ACCOUNT_SERVICE_BASE_URL = os.getenv(
+    "ACCOUNT_SERVICE_BASE_URL",
+    "http://localhost:8000"
+)
 
 
-@app.get("/generate-pdf/{account_id}")
-def generate_pdf(account_id: int):
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-    # Ensure docs folder exists
-    docs_dir = "docs"
-    os.makedirs(docs_dir, exist_ok=True)
 
-    filename = f"statement_{account_id}.pdf"
-    filepath = os.path.join(docs_dir, filename)
+@app.get("/documents/accounts/{account_number}/statement")
+def generate_account_statement(account_number: str):
+    """
+    Fetch transactions from Account microservice
+    and generate a PDF account statement.
+    """
 
-    # PDF creation
+    # -------- Call Account microservice --------
+    url = f"{ACCOUNT_SERVICE_BASE_URL}/accounts/by-number/{account_number}/transactions"
+
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(url)
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Account service unavailable")
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail="Failed to fetch transactions"
+        )
+
+    transactions = response.json()
+
+    # -------- Prepare PDF storage --------
+    os.makedirs("docs", exist_ok=True)
+    filename = f"statement_{account_number}.pdf"
+    filepath = os.path.join("docs", filename)
+
+    # -------- Generate PDF --------
     c = canvas.Canvas(filepath, pagesize=letter)
     width, height = letter
 
     # Header
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(180, height - 50, "Account Statement")
+    c.drawString(170, height - 50, "Account Statement")
+
     c.setFont("Helvetica", 12)
-    c.drawString(50, height - 80, f"Account ID: {account_id}")
-    c.drawString(50, height - 100, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    c.drawString(50, height - 80, f"Account Number: {account_number}")
+    c.drawString(
+        50,
+        height - 100,
+        f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    )
 
     # Table header
     y = height - 150
@@ -76,34 +72,48 @@ def generate_pdf(account_id: int):
     c.drawString(130, y, "Type")
     c.drawString(220, y, "Amount (€)")
     c.drawString(320, y, "From")
-    c.drawString(400, y, "To")
-    c.drawString(480, y, "Description")
+    c.drawString(410, y, "To")
+    c.drawString(490, y, "Description")
     c.line(40, y - 5, 560, y - 5)
 
     # Table rows
     y -= 25
     c.setFont("Helvetica", 10)
 
-    for txn in DUMMY_TRANSACTIONS:
+    for tx in transactions:
+        # Handle ISO datetime with Z suffix
+        created_at = datetime.fromisoformat(
+            tx["created_at"].replace("Z", "+00:00")
+        ).strftime("%Y-%m-%d %H:%M")
 
-        c.drawString(40, y, txn["created_at"])
-        c.drawString(130, y, txn["tx_type"])
-        c.drawString(220, y, str(txn["amount"]))
+        tx_type = tx["tx_type"]
+        amount = str(tx["amount"])
 
-        from_acc = txn["sender_account_number"] or "-"
-        to_acc = txn["receiver_account_number"] or "-"
+        from_acc = tx.get("sender_account_number") or "-"
+        to_acc = tx.get("receiver_account_number") or "-"
+        description = tx.get("description") or "-"
 
+        c.drawString(40, y, created_at)
+        c.drawString(130, y, tx_type)
+        c.drawString(220, y, amount)
         c.drawString(320, y, from_acc)
-        c.drawString(400, y, to_acc)
-
-        description = txn["description"] or "-"
-        c.drawString(480, y, description[:20])  # Trim text so it fits
+        c.drawString(410, y, to_acc)
+        c.drawString(490, y, description[:20])
 
         y -= 20
 
+        # Page break
+        if y < 80:
+            c.showPage()
+            c.setFont("Helvetica", 10)
+            y = height - 80
+
     # Footer
+    c.setFont("Helvetica-Oblique", 9)
+    c.drawString(50, 50, "This is a system-generated statement.")
     c.save()
 
+    # -------- Return PDF --------
     return FileResponse(
         path=filepath,
         media_type="application/pdf",
